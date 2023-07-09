@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use hidapi::HidApi;
 use libspa::pod::deserialize::PodDeserializer;
 use libspa::pod::serialize::PodSerializer;
@@ -6,6 +8,7 @@ use libspa_sys::{SPA_PARAM_Props, SPA_PROP_mute, SPA_TYPE_OBJECT_Props};
 use log::*;
 use pipewire::{prelude::*, Context, MainLoop};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -75,7 +78,14 @@ impl StreamContext {
     }
 }
 
-// TODO: impl Debug for StreamContext
+impl fmt::Debug for StreamContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Point")
+            .field("mute", &self.mute)
+            .field("node", &self.node)
+            .finish()
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
@@ -172,8 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let registry = core.get_registry()?;
 
             move |global| {
-                let n2 = nodes.clone();
-                let mut nodes = nodes.lock().unwrap();
+                let nodes_for_inner_closure = nodes.clone();
 
                 trace!("Scanning new global: {:?}", global);
 
@@ -191,12 +200,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 trace!("Listening to node: {:?}", &node);
 
+                                //
+
                                 let node_listener = node
                                     .add_listener_local()
                                     .param({
                                         let tx = tx.clone();
                                         move |_s, _pt, _u1, _u2, _buf| {
-                                            let mut nodes = n2.lock().unwrap();
                                             let (_, data) =
                                                 PodDeserializer::deserialize_from::<Value>(&_buf)
                                                     .unwrap();
@@ -224,6 +234,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         global_id,
                                                         if mute { "muted" } else { "unmuted" }
                                                     );
+
+                                                    let mut nodes =
+                                                        nodes_for_inner_closure.lock().unwrap();
                                                     let mut node = nodes.get_mut(&global_id);
                                                     if let Some(node) = &mut node {
                                                         node.mute = mute;
@@ -244,8 +257,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 node.subscribe_params(&[libspa::param::ParamType::Props]);
                                 //node.enum_params(0, Some(libspa::param::ParamType::Props), 0, u32::MAX);
 
+                                let mut nodes = nodes.lock().unwrap();
                                 nodes.insert(global.id, StreamContext::new(node, node_listener));
-                                //trace!("Node list: {:?}", nodes);
+                                trace!("Node list: {:?}", nodes);
                             }
                         }
                     }
@@ -265,7 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     debug!("Removed global: {:?}", id);
                     let _ = tx.send(Message::State(State::Silent));
                 }
-                //trace!("Node list: {:?}", nodes);
+                trace!("Node list: {:?}", nodes);
             }
         })
         .register();
