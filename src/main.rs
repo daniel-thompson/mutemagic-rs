@@ -98,22 +98,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
         let tx = tx.clone();
-        thread::spawn(move || {
-            loop {
-                let mut buf = [0u8; 8];
-                let _res = puck.read(&mut buf[..]).unwrap();
 
-                match buf[3] {
-                    4 => {
-                        let _ = tx.send(Message::Event(Event::Press));
-                    }
-                    2 => {
-                        let _ = tx.send(Message::Event(Event::Release));
-                    }
-                    1 => { /* still pressed (and pointless) */ }
-                    0 => { /* second "releases" message */ }
-                    _ => (),
+        thread::spawn(move || loop {
+            let mut buf = [0u8; 8];
+            let _res = puck.read(&mut buf[..]).unwrap();
+
+            match buf[3] {
+                4 => {
+                    let _ = tx.send(Message::Event(Event::Press));
                 }
+                2 => {
+                    let _ = tx.send(Message::Event(Event::Release));
+                }
+                _ => (),
             }
         });
     }
