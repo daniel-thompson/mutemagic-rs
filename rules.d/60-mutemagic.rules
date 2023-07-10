@@ -1,0 +1,13 @@
+# This rule is used by mutemagic-rs.
+#
+# Allows non-root users to have raw access to mute button devices.
+# Allowing users to write to the device is potentially dangerous
+# because they could perform firmware updates.
+
+ACTION != "add", GOTO="mutemagic_end"
+SUBSYSTEM != "hidraw", GOTO="mutemagic_end"
+
+# MuteMe Original
+ATTRS{idVendor}=="20a0", ATTRS{idProduct}=="42da", TAG+="uaccess"
+
+LABEL="solaar_end"
