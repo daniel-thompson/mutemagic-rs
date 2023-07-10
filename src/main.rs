@@ -93,11 +93,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = mpsc::channel::<Message>();
     let (pw_tx, pw_rx) = pipewire::channel::channel();
 
+    let api = HidApi::new().expect("Failed to create API instance");
+
     {
+        let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
         let tx = tx.clone();
         thread::spawn(move || {
-            let api = HidApi::new().expect("Failed to create API instance");
-            let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
             loop {
                 let mut buf = [0u8; 8];
                 let _res = puck.read(&mut buf[..]).unwrap();
@@ -118,10 +119,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
-        thread::spawn(move || {
-            let api = HidApi::new().expect("Failed to create API instance");
-            let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
+        let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
 
+        thread::spawn(move || {
             let mut led = [0u8, 0, 0];
 
             // Set a default initial state and update the puck accordingly
