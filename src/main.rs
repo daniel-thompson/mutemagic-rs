@@ -63,14 +63,73 @@ enum Message {
 }
 
 struct StreamContext {
+    global_id: u32,
     mute: bool,
     node: pipewire::node::Node,
     _node_listener: pipewire::node::NodeListener,
 }
 
 impl StreamContext {
-    fn new(node: pipewire::node::Node, node_listener: pipewire::node::NodeListener) -> Self {
+    fn new(
+        global_id: u32,
+        node: pipewire::node::Node,
+        tx: mpsc::Sender<Message>,
+        nodes: Arc<Mutex<HashMap<u32, StreamContext>>>,
+    ) -> Self {
+        trace!("Listening to node: {:?}", &node);
+
+        let node_listener = node
+            .add_listener_local()
+            .param(move |_s, _pt, _u1, _u2, buf| {
+                let (_, data) = PodDeserializer::deserialize_from::<Value>(&buf).unwrap();
+
+                trace!("Evaluating node parameter: {:?}", &data);
+
+                if let Value::Object(data) = data {
+                    let v = data
+                        .properties
+                        .binary_search_by(|prop| prop.key.cmp(&SPA_PROP_mute));
+                    if let Ok(i) = v {
+                        let mute = &data.properties[i];
+
+                        // At this state we have found the mute property. We
+                        // know that should be a bool to we don't mind panicing
+                        // if it isn't
+                        let mute = if let Value::Bool(m) = mute.value {
+                            m
+                        } else {
+                            unreachable!();
+                        };
+
+                        debug!(
+                            "Mute change event: global id {} is {}",
+                            global_id,
+                            if mute { "muted" } else { "unmuted" }
+                        );
+
+                        // TODO: Convert the notification into a closure
+                        let mut nodes = nodes.lock().unwrap();
+                        let mut node = nodes.get_mut(&global_id);
+                        if let Some(node) = &mut node {
+                            node.mute = mute;
+
+                            // TODO: implement the voting version...
+                            let _ = tx.send(if mute {
+                                Message::State(State::Muted)
+                            } else {
+                                Message::State(State::Unmuted)
+                            });
+                        }
+                    }
+                }
+            })
+            .register();
+
+        node.subscribe_params(&[libspa::param::ParamType::Props]);
+        //node.enum_params(0, Some(libspa::param::ParamType::Props), 0, u32::MAX);
+
         Self {
+            global_id,
             mute: false,
             node,
             _node_listener: node_listener,
@@ -81,6 +140,7 @@ impl StreamContext {
 impl fmt::Debug for StreamContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Point")
+            .field("global_id", &self.global_id)
             .field("mute", &self.mute)
             .field("node", &self.node)
             .finish()
@@ -179,85 +239,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let registry = core.get_registry()?;
 
             move |global| {
-                let nodes_for_inner_closure = nodes.clone();
-
                 trace!("Scanning new global: {:?}", global);
 
                 if let Some(properties) = &global.props {
-                    if let Some("Stream/Input/Audio") = properties.get("media.class") {
-                        if let Some("Manager") = properties.get("media.category") {
-                            // Some of the nodes created by pavucontrol have media.class but
-                            // can be distinguished from "real" input streams with this additional
-                            // tag.
-                            //
-                            // Ignore anything with that tag!
-                        } else {
-                            if let Ok(node) = registry.bind::<pipewire::node::Node, _>(global) {
-                                let global_id = global.id;
+                    let media_class = properties.get("media.class").unwrap_or("");
+                    let media_category = properties.get("media.category").unwrap_or("");
+                    let application_name = properties.get("application.name").unwrap_or("UNKNOWN");
 
-                                trace!("Listening to node: {:?}", &node);
+                    // Programs like GNOME Settings and PulseAudio Volume Control create nodes
+                    // where media.class is "Stream/Input/Audio".
+                    //
+                    // In newer distros we can recognise these by looking at the media.category field.
+                    // Sadly in older distros this does not work and we simply rely on an ignore
+                    // list. Ideas a better heuristic would be very welcome...
+                    const IGNORE_LIST: &[&str] = &["GNOME Settings", "PulseAudio Volume Control"];
+                    let ignore =
+                        media_category == "Manager" || IGNORE_LIST.contains(&application_name);
 
-                                //
+                    if media_class == "Stream/Input/Audio" && !ignore {
+                        if let Ok(node) = registry.bind::<pipewire::node::Node, _>(global) {
+                            let ctx =
+                                StreamContext::new(global.id, node, tx.clone(), nodes.clone());
 
-                                let node_listener = node
-                                    .add_listener_local()
-                                    .param({
-                                        let tx = tx.clone();
-                                        move |_s, _pt, _u1, _u2, _buf| {
-                                            let (_, data) =
-                                                PodDeserializer::deserialize_from::<Value>(&_buf)
-                                                    .unwrap();
-
-                                            trace!("Evaluating node parameter: {:?}", &data);
-
-                                            if let Value::Object(data) = data {
-                                                let v = data.properties.binary_search_by(|prop| {
-                                                    prop.key.cmp(&SPA_PROP_mute)
-                                                });
-                                                if let Ok(i) = v {
-                                                    let mute = &data.properties[i];
-
-                                                    // At this state we have found the mute property. We
-                                                    // know that should be a bool to we don't mind panicing
-                                                    // if it isn't
-                                                    let mute = if let Value::Bool(m) = mute.value {
-                                                        m
-                                                    } else {
-                                                        unreachable!();
-                                                    };
-
-                                                    debug!(
-                                                        "Mute change event: global id {} is {}",
-                                                        global_id,
-                                                        if mute { "muted" } else { "unmuted" }
-                                                    );
-
-                                                    let mut nodes =
-                                                        nodes_for_inner_closure.lock().unwrap();
-                                                    let mut node = nodes.get_mut(&global_id);
-                                                    if let Some(node) = &mut node {
-                                                        node.mute = mute;
-
-                                                        // TODO: implement the voting version...
-                                                        let _ = tx.send(if mute {
-                                                            Message::State(State::Muted)
-                                                        } else {
-                                                            Message::State(State::Unmuted)
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    })
-                                    .register();
-
-                                node.subscribe_params(&[libspa::param::ParamType::Props]);
-                                //node.enum_params(0, Some(libspa::param::ParamType::Props), 0, u32::MAX);
-
-                                let mut nodes = nodes.lock().unwrap();
-                                nodes.insert(global.id, StreamContext::new(node, node_listener));
-                                trace!("Node list: {:?}", nodes);
-                            }
+                            let mut nodes = nodes.lock().unwrap();
+                            nodes.insert(global.id, ctx);
+                            debug!("Added global: {:?} ({})", global.id, application_name);
+                            trace!("Node list: {:?}", nodes);
                         }
                     }
                 }
