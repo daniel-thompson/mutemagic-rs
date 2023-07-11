@@ -219,7 +219,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // and ask the pipewire thread to update the streams
                         if let Event::Release = button_state {
                             let new_state = match mute_state {
-                                State::Silent => State::Silent,
+                                State::Silent => {
+                                    info!("No mute change event (no streams)");
+                                    State::Silent
+                                }
                                 State::Muted => State::Unmuted,
                                 _ => State::Muted,
                             };
