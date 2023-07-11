@@ -172,6 +172,13 @@ impl fmt::Debug for StreamContext {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
 
+    let orig_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // invoke the default handler and exit the process
+        orig_hook(panic_info);
+        std::process::exit(1);
+    }));
+
     let (tx, rx) = mpsc::channel::<Message>();
     let (pw_tx, pw_rx) = pipewire::channel::channel();
 
