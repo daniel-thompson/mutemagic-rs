@@ -105,14 +105,14 @@ impl StreamContext {
         tx: mpsc::Sender<Message>,
         nodes: Arc<Mutex<HashMap<u32, StreamContext>>>,
     ) -> Self {
-        trace!("Listening to node: {:?}", &node);
+        debug!("Listening to node: {:?}", &node);
 
         let node_listener = node
             .add_listener_local()
             .param(move |_s, _pt, _u1, _u2, buf| {
                 let (_, data) = PodDeserializer::deserialize_from::<Value>(&buf).unwrap();
 
-                trace!("Evaluating node parameter: {:?}", &data);
+                debug!("Evaluating node parameter: {:?}", &data);
 
                 if let Value::Object(data) = data {
                     let v = data
@@ -130,7 +130,7 @@ impl StreamContext {
                             unreachable!();
                         };
 
-                        debug!(
+                        info!(
                             "Mute change event: global id {} is {}",
                             global_id,
                             if mute { "muted" } else { "unmuted" }
@@ -261,7 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let registry = core.get_registry()?;
 
             move |global| {
-                trace!("Scanning new global: {:?}", global);
+                debug!("Scanning new global: {:?}", global);
 
                 if let Some(properties) = &global.props {
                     let media_class = properties.get("media.class").unwrap_or("");
@@ -285,7 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             let mut nodes = nodes.lock().unwrap();
                             nodes.insert(global.id, ctx);
-                            debug!("Added global: {:?} ({})", global.id, application_name);
+                            info!("Added global: {:?} ({})", global.id, application_name);
                             trace!("Node list: {:?}", nodes);
                         }
                     }
