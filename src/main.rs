@@ -69,6 +69,35 @@ struct StreamContext {
     _node_listener: pipewire::node::NodeListener,
 }
 
+fn get_state_from_nodes(nodes: &HashMap<u32, StreamContext>) -> State {
+    nodes
+        .iter()
+        .fold(State::Silent, |state, (_, ctx)| match state {
+            State::Silent => {
+                if ctx.mute {
+                    State::Muted
+                } else {
+                    State::Unmuted
+                }
+            }
+            State::Muted => {
+                if ctx.mute {
+                    State::Muted
+                } else {
+                    State::Confused
+                }
+            }
+            State::Unmuted => {
+                if ctx.mute {
+                    State::Confused
+                } else {
+                    State::Unmuted
+                }
+            }
+            State::Confused => State::Confused,
+        })
+}
+
 impl StreamContext {
     fn new(
         global_id: u32,
@@ -107,18 +136,11 @@ impl StreamContext {
                             if mute { "muted" } else { "unmuted" }
                         );
 
-                        // TODO: Convert the notification into a closure
                         let mut nodes = nodes.lock().unwrap();
                         let mut node = nodes.get_mut(&global_id);
                         if let Some(node) = &mut node {
                             node.mute = mute;
-
-                            // TODO: implement the voting version...
-                            let _ = tx.send(if mute {
-                                Message::State(State::Muted)
-                            } else {
-                                Message::State(State::Unmuted)
-                            });
+                            let _ = tx.send(Message::State(get_state_from_nodes(&nodes)));
                         }
                     }
                 }
@@ -278,10 +300,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut nodes = nodes.lock().unwrap();
                 let node = nodes.remove(&id);
                 if let Some(_node) = node {
-                    // TODO: implement the voting version...
-                    //
-                    debug!("Removed global: {:?}", id);
-                    let _ = tx.send(Message::State(State::Silent));
+                    info!("Removed global: {:?}", id);
+                    let _ = tx.send(Message::State(get_state_from_nodes(&nodes)));
                 }
                 trace!("Node list: {:?}", nodes);
             }
