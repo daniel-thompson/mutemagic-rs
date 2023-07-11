@@ -17,7 +17,7 @@ const GREEN: u8 = 0x02;
 const BLUE: u8 = 0x04;
 const STRONG: u8 = 0x00;
 const WEAK: u8 = 0x10;
-const _FAST_PULSE: u8 = 0x20;
+const FAST_PULSE: u8 = 0x20;
 const SLOW_PULSE: u8 = 0x30;
 
 #[derive(Debug, Clone, Copy)]
@@ -43,7 +43,7 @@ impl State {
             (State::Muted, Event::Release) => RED | SLOW_PULSE,
             (State::Unmuted, Event::Press) => GREEN | STRONG,
             (State::Unmuted, Event::Release) => GREEN | WEAK,
-            (State::Confused, _) => RED | GREEN | SLOW_PULSE,
+            (State::Confused, _) => RED | GREEN | FAST_PULSE,
         }
     }
 
