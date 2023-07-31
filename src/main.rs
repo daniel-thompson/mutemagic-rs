@@ -7,9 +7,10 @@ use libspa::pod::{Object, Property, PropertyFlags, Value};
 use libspa_sys::{SPA_PARAM_Props, SPA_PROP_mute, SPA_TYPE_OBJECT_Props};
 use log::*;
 use pipewire::{prelude::*, Context, MainLoop};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{mpsc, Arc, Mutex};
+use std::rc::Rc;
 use std::thread;
 
 const RED: u8 = 0x01;
@@ -26,7 +27,7 @@ enum Event {
     Release,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Silent,
     Muted,
@@ -35,6 +36,16 @@ enum State {
 }
 
 impl State {
+    #[rustfmt::skip] // don't reformat the "ternary" conditions
+    fn from_bools(nodes: impl Iterator<Item=bool>) -> State {
+        nodes.fold(State::Silent, |state, mute| match state {
+            State::Silent => if mute { State::Muted } else { State::Unmuted },
+            State::Muted => if mute { State::Muted } else { State::Confused },
+            State::Unmuted => if mute { State::Confused } else { State::Unmuted },
+            State::Confused => State::Confused,
+        })
+    }
+
     fn msg(&self, event: &Event) -> u8 {
         match (self, event) {
             (State::Silent, Event::Press) => BLUE | WEAK,
@@ -63,51 +74,19 @@ enum Message {
 }
 
 struct StreamContext {
-    global_id: u32,
     mute: bool,
     node: pipewire::node::Node,
     _node_listener: pipewire::node::NodeListener,
 }
 
-fn get_state_from_nodes(nodes: &HashMap<u32, StreamContext>) -> State {
-    nodes
-        .iter()
-        .fold(State::Silent, |state, (_, ctx)| match state {
-            State::Silent => {
-                if ctx.mute {
-                    State::Muted
-                } else {
-                    State::Unmuted
-                }
-            }
-            State::Muted => {
-                if ctx.mute {
-                    State::Muted
-                } else {
-                    State::Confused
-                }
-            }
-            State::Unmuted => {
-                if ctx.mute {
-                    State::Confused
-                } else {
-                    State::Unmuted
-                }
-            }
-            State::Confused => State::Confused,
-        })
-}
-
 impl StreamContext {
-    fn new(
-        global_id: u32,
-        node: pipewire::node::Node,
-        tx: mpsc::Sender<Message>,
-        nodes: Arc<Mutex<HashMap<u32, StreamContext>>>,
-    ) -> Self {
+    fn new(node: pipewire::node::Node, update_mute: impl Fn(bool) + 'static) -> Self {
         debug!("Listening to node: {:?}", &node);
 
-        let node_listener = node
+        // This listener is not used after creation (and has no useful methods)
+        // hence the underscore naming. However it *must* be moved into the
+        // stream context to ensure it is not dropped.
+        let _node_listener = node
             .add_listener_local()
             .param(move |_s, _pt, _u1, _u2, buf| {
                 let (_, data) = PodDeserializer::deserialize_from::<Value>(&buf).unwrap();
@@ -115,46 +94,27 @@ impl StreamContext {
                 debug!("Evaluating node parameter: {:?}", &data);
 
                 if let Value::Object(data) = data {
-                    let v = data
+                    let i = data
                         .properties
                         .binary_search_by(|prop| prop.key.cmp(&SPA_PROP_mute));
-                    if let Ok(i) = v {
-                        let mute = &data.properties[i];
-
-                        // At this state we have found the mute property. We
-                        // know that should be a bool to we don't mind panicing
-                        // if it isn't
-                        let mute = if let Value::Bool(m) = mute.value {
-                            m
-                        } else {
-                            unreachable!();
-                        };
-
-                        info!(
-                            "Mute change event: global id {} is {}",
-                            global_id,
-                            if mute { "muted" } else { "unmuted" }
-                        );
-
-                        let mut nodes = nodes.lock().unwrap();
-                        let mut node = nodes.get_mut(&global_id);
-                        if let Some(node) = &mut node {
-                            node.mute = mute;
-                            let _ = tx.send(Message::State(get_state_from_nodes(&nodes)));
+                    if let Ok(i) = i {
+                        if let Value::Bool(mute) = data.properties[i].value {
+                            update_mute(mute);
                         }
                     }
                 }
             })
             .register();
 
+        // There is no need to call node.enum_params() here because subscribing
+        // is enough to get the above closure called to collect the current state
+        // of the parameters.
         node.subscribe_params(&[libspa::param::ParamType::Props]);
-        //node.enum_params(0, Some(libspa::param::ParamType::Props), 0, u32::MAX);
 
         Self {
-            global_id,
             mute: false,
             node,
-            _node_listener: node_listener,
+            _node_listener,
         }
     }
 }
@@ -162,7 +122,6 @@ impl StreamContext {
 impl fmt::Debug for StreamContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Point")
-            .field("global_id", &self.global_id)
             .field("mute", &self.mute)
             .field("node", &self.node)
             .finish()
@@ -174,13 +133,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let orig_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        // invoke the default handler and exit the process
+        // invoke the default handler, then exit the process
         orig_hook(panic_info);
+
         std::process::exit(1);
     }));
 
-    let (tx, rx) = mpsc::channel::<Message>();
-    let (pw_tx, pw_rx) = pipewire::channel::channel();
+    //let (tx, rx) = mpsc::channel::<Message>();
+    let (tx, rx) = pipewire::channel::channel::<Message>();
 
     let api = HidApi::new().expect("Failed to create API instance");
 
@@ -196,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 4 => {
                     let _ = tx.send(Message::Event(Event::Press));
                 }
-                2 => {
+                0 => {
                     let _ = tx.send(Message::Event(Event::Release));
                 }
                 _ => (),
@@ -204,53 +164,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    {
-        let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
-
-        thread::spawn(move || {
-            let mut led = [0u8, 0, 0];
-
-            // Set a default initial state and update the puck accordingly
-            let mut mute_state = State::Silent;
-            let mut button_state = Event::Release;
-            let _ = puck.write(&led);
-
-            loop {
-                let msg = rx.recv().unwrap_or(Message::State(State::Confused));
-
-                match msg {
-                    Message::Event(evt) => {
-                        button_state = evt;
-
-                        // On button release we update the current mute state
-                        // and ask the pipewire thread to update the streams
-                        if let Event::Release = button_state {
-                            let new_state = match mute_state {
-                                State::Silent => {
-                                    info!("No mute change event (no streams)");
-                                    State::Silent
-                                }
-                                State::Muted => State::Unmuted,
-                                _ => State::Muted,
-                            };
-
-                            let _ = pw_tx.send(new_state);
-                        }
-                    }
-                    Message::State(state) => {
-                        mute_state = state;
-                    }
-                }
-
-                led[0] = mute_state.msg(&button_state);
-                let _ = puck.write(&led);
-            }
-        });
-    }
-
     //
-    // At this point we've kicked off the two threads to manage the puck so we
-    // can leave this thread to run the pipewire main loop.
+    // At this point we've kicked off the thread to manage input from the
+    // puck so we can use the main thread to run the pipewire main loop.
     //
 
     let mainloop = MainLoop::new()?;
@@ -258,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let core = context.connect(None)?;
     let registry = core.get_registry()?;
 
-    let nodes = Arc::new(Mutex::new(HashMap::<u32, StreamContext>::new()));
+    let nodes = Rc::new(RefCell::new(HashMap::<u32, StreamContext>::new()));
 
     // Register a callback to the `global` event on the registry, which notifies of any new global objects
     // appearing on the remote.
@@ -290,11 +206,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if media_class == "Stream/Input/Audio" && !ignore {
                         if let Ok(node) = registry.bind::<pipewire::node::Node, _>(global) {
-                            let ctx =
-                                StreamContext::new(global.id, node, tx.clone(), nodes.clone());
+                            let ctx = StreamContext::new(node, {
+                                let global_id = global.id;
+                                let nodes = nodes.clone();
+                                let tx = tx.clone();
 
-                            let mut nodes = nodes.lock().unwrap();
-                            nodes.insert(global.id, ctx);
+                                move |mute| {
+                                    info!(
+                                        "Mute change event: global id {} is {}",
+                                        global_id,
+                                        if mute { "muted" } else { "unmuted" }
+                                    );
+
+                                    let mut nodes = nodes.borrow_mut();
+                                    let mut node = nodes.get_mut(&global_id);
+                                    if let Some(node) = &mut node {
+                                        node.mute = mute;
+
+                                        let state = State::from_bools(
+                                            nodes.iter().map(|(_, ctx)| ctx.mute),
+                                        );
+                                        let _ = tx.send(Message::State(state));
+                                    }
+                                }
+                            });
+
+                            nodes.borrow_mut().insert(global.id, ctx);
                             info!("Added global: {:?} ({})", global.id, application_name);
                             trace!("Node list: {:?}", nodes);
                         }
@@ -307,46 +244,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let tx = tx.clone();
 
             move |id| {
-                let mut nodes = nodes.lock().unwrap();
+                let mut nodes = nodes.borrow_mut();
                 let node = nodes.remove(&id);
                 if let Some(_node) = node {
                     info!("Removed global: {:?}", id);
-                    let _ = tx.send(Message::State(get_state_from_nodes(&nodes)));
+                    let state = State::from_bools(nodes.iter().map(|(_, ctx)| ctx.mute));
+                    let _ = tx.send(Message::State(state));
                 }
                 trace!("Node list: {:?}", nodes);
             }
         })
         .register();
 
-    let _rx = pw_rx.attach(&mainloop, move |state| {
-        if let Some(mute) = state.is_muted() {
-            let pod = Value::Object(Object {
-                type_: SPA_TYPE_OBJECT_Props,
-                id: SPA_PARAM_Props,
-                properties: vec![Property {
-                    key: SPA_PROP_mute,
-                    flags: PropertyFlags::empty(),
-                    value: Value::Bool(mute),
-                }],
-            });
+    let _rx = rx.attach(&mainloop, {
+        let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
+        let _ = puck.write(&[0, 0, 0]);
 
-            let mut data = std::io::Cursor::new(Vec::<u8>::new());
-            let res = PodSerializer::serialize(&mut data, &pod);
+        let mute_state = Cell::new(State::Silent);
+        let button_state = Cell::new(Event::Release);
 
-            if let Ok((data, len)) = res {
-                let data = data.get_ref();
-                assert!(data.len() == len as usize);
-
-                let nodes = nodes.lock().unwrap();
-
-                for (_k, ctx) in nodes.iter() {
-                    ctx.node.set_param(libspa::param::ParamType::Props, 0, data);
+        move |msg| {
+            match msg {
+                Message::State(state) => {
+                    mute_state.set(state);
                 }
-            } else {
-                unreachable!();
+                Message::Event(evt) => {
+                    button_state.set(evt);
+
+                    // On button release we update the current mute state and,
+                    // if needed, ask the pipewire thread to update the streams
+                    if let Event::Release = button_state.get() {
+                        let next_mute_state = match mute_state.get() {
+                            State::Silent => State::Silent,
+                            State::Muted => State::Unmuted,
+                            _ => State::Muted,
+                        };
+
+                        if let Some(mute) = next_mute_state.is_muted() {
+                            let pod = Value::Object(Object {
+                                type_: SPA_TYPE_OBJECT_Props,
+                                id: SPA_PARAM_Props,
+                                properties: vec![Property {
+                                    key: SPA_PROP_mute,
+                                    flags: PropertyFlags::empty(),
+                                    value: Value::Bool(mute),
+                                }],
+                            });
+
+                            let mut data = std::io::Cursor::new(Vec::<u8>::new());
+                            let res = PodSerializer::serialize(&mut data, &pod);
+
+                            if let Ok((data, len)) = res {
+                                let data = data.get_ref();
+                                assert!(data.len() == len as usize);
+
+                                let nodes = nodes.borrow_mut();
+
+                                for (_k, ctx) in nodes.iter() {
+                                    ctx.node.set_param(libspa::param::ParamType::Props, 0, data);
+                                }
+                            } else {
+                                unreachable!();
+                            }
+                        } else if State::Silent == next_mute_state {
+                            info!("No mute change event (no streams)");
+                        }
+                    }
+                }
             }
+
+            let _ = puck.write(&[mute_state.get().msg(&button_state.get()), 0, 0]);
         }
     });
+
+    ctrlc::set_handler(move || {
+        let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
+        let _ = puck.write(&[0, 0, 0]);
+        std::process::exit(1);
+    })
+    .unwrap();
 
     mainloop.run();
 
