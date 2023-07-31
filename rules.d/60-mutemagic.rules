@@ -10,4 +10,4 @@ SUBSYSTEM != "hidraw", GOTO="mutemagic_end"
 # MuteMe Original
 ATTRS{idVendor}=="20a0", ATTRS{idProduct}=="42da", TAG+="uaccess"
 
-LABEL="solaar_end"
+LABEL="mutemagic_end"
