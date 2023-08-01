@@ -14,13 +14,11 @@ Features
 --------
 
  * Indicates when the microphones are active and inactive
- * Preserves mute state through application relaunch (if supported by
-   the pipewire session manager)
+ * Preserves mute state through application relaunch, if supported by
+   your pipewire session manager)
  * Power efficient. MuteMagic does not use polling to track the button
-   state and therefore manages zero wake ups per second whilst the
-   device is plugged in. Note that basic integration using the user-level
-   systemd service does not receive hotplug events so when the device is
-   not connected there will a hotplug scan every five seconds.
+   or hotplug state so, unless you press the button, there are zero
+   wakeups per second.
 
 How it works
 ------------

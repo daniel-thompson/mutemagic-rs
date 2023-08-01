@@ -10,6 +10,8 @@ use pipewire::{prelude::*, Context, MainLoop};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
+use std::os::fd::AsRawFd;
 use std::rc::Rc;
 use std::thread;
 
@@ -25,6 +27,7 @@ const SLOW_PULSE: u8 = 0x30;
 enum Event {
     Press,
     Release,
+    Hotplug,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +131,41 @@ impl fmt::Debug for StreamContext {
     }
 }
 
+struct HotplugMonitor {
+    socket: udev::MonitorSocket,
+}
+
+impl HotplugMonitor {
+    fn new(subsys: &str) -> io::Result<Self> {
+        let socket = udev::MonitorBuilder::new()?
+            .match_subsystem(subsys)?
+            .listen()?;
+
+        Ok(Self { socket })
+    }
+
+    fn wait_for_event(&self) -> io::Result<udev::Event> {
+        let mut fds = [nix::poll::PollFd::new(
+            self.socket.as_raw_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+
+        let result = nix::poll::poll(&mut fds, -1);
+        if let Err(_errno) = result {
+            Err(io::Error::last_os_error())
+        } else {
+            match self.socket.iter().next() {
+                Some(evt) => Ok(evt),
+                None => unreachable!(),
+            }
+        }
+    }
+
+    fn clear_events(&self) {
+        for _ in self.socket.iter() {}
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
 
@@ -139,27 +177,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }));
 
-    //let (tx, rx) = mpsc::channel::<Message>();
     let (tx, rx) = pipewire::channel::channel::<Message>();
 
-    let api = HidApi::new().expect("Failed to create API instance");
-
     {
-        let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
         let tx = tx.clone();
 
-        thread::spawn(move || loop {
-            let mut buf = [0u8; 8];
-            let _res = puck.read(&mut buf[..]).unwrap();
+        thread::spawn(move || {
+            let monitor = HotplugMonitor::new("hidraw").expect("Cannot monitor hotplug events");
 
-            match buf[3] {
-                4 => {
-                    let _ = tx.send(Message::Event(Event::Press));
+            loop {
+                let api = HidApi::new().expect("Failed to create API instance");
+                let puck = api.open(0x20a0, 0x42da);
+
+                if let Ok(puck) = puck {
+                    monitor.clear_events();
+                    let _ = tx.send(Message::Event(Event::Hotplug));
+
+                    loop {
+                        let mut buf = [0u8; 8];
+                        let res = puck.read(&mut buf[..]);
+                        if let Err(_) = res {
+                            break;
+                        }
+
+                        match buf[3] {
+                            4 => {
+                                let _ = tx.send(Message::Event(Event::Press));
+                            }
+                            0 => {
+                                let _ = tx.send(Message::Event(Event::Release));
+                            }
+                            _ => (),
+                        }
+                    }
+                } else {
+                    info!("Waiting for add event");
+                    while {
+                        let event = monitor.wait_for_event();
+                        if let Ok(event) = event {
+                            event.event_type() != udev::EventType::Add
+                        } else {
+                            info!("Re-waiting for event");
+                            true
+                        }
+                    } {}
                 }
-                0 => {
-                    let _ = tx.send(Message::Event(Event::Release));
-                }
-                _ => (),
             }
         });
     }
@@ -257,9 +319,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register();
 
     let _rx = rx.attach(&mainloop, {
-        let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
-        let _ = puck.write(&[0, 0, 0]);
-
         let mute_state = Cell::new(State::Silent);
         let button_state = Cell::new(Event::Release);
 
@@ -313,13 +372,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let _ = puck.write(&[mute_state.get().msg(&button_state.get()), 0, 0]);
+            let api = HidApi::new().expect("Failed to create API instance");
+            let puck = api.open(0x20a0, 0x42da);
+            if let Ok(puck) = puck {
+                let _ = puck.write(&[mute_state.get().msg(&button_state.get()), 0, 0]);
+            }
         }
     });
 
     ctrlc::set_handler(move || {
-        let puck = api.open(0x20a0, 0x42da).expect("Failed to open device");
-        let _ = puck.write(&[0, 0, 0]);
+        // Try to clear the LEDs before we exit...
+        let api = HidApi::new().expect("Failed to create API instance");
+        let puck = api.open(0x20a0, 0x42da);
+        if let Ok(puck) = puck {
+            let _ = puck.write(&[0, 0, 0]);
+        }
         std::process::exit(1);
     })
     .unwrap();
