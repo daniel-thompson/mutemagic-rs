@@ -74,6 +74,12 @@ To install try:
 git clone https://github.com/daniel-thompson/mutemagic-rs
 cd mutemagic-rs
 cargo install --path .
+
+# If you do not install the appropriate udev rules then you will be
+# forced to run MuteMagic as root...
+sudo cp rules.d/60-mutemagic.rules /etc/udev/rules.d
+sudo udevadm monitor --reload
+
 mutemagic-rs
 ~~~
 
