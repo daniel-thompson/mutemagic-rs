@@ -52,11 +52,11 @@ impl State {
     fn msg(&self, event: &Event) -> u8 {
         match (self, event) {
             (State::Silent, Event::Press) => BLUE | WEAK,
-            (State::Silent, Event::Release) => 0,
+            (State::Silent, _) => 0,
             (State::Muted, Event::Press) => RED | STRONG,
-            (State::Muted, Event::Release) => RED | SLOW_PULSE,
+            (State::Muted, _) => RED | SLOW_PULSE,
             (State::Unmuted, Event::Press) => GREEN | STRONG,
-            (State::Unmuted, Event::Release) => GREEN | WEAK,
+            (State::Unmuted, _) => GREEN | WEAK,
             (State::Confused, _) => RED | GREEN | FAST_PULSE,
         }
     }
@@ -190,6 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let puck = api.open(0x20a0, 0x42da);
 
                 if let Ok(puck) = puck {
+                    info!("Connected to mute device");
                     monitor.clear_events();
                     let _ = tx.send(Message::Event(Event::Hotplug));
 
