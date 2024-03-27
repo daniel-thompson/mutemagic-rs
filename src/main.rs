@@ -183,10 +183,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, rx) = pipewire::channel::channel::<Message>();
 
-    {
+    thread::spawn({
         let tx = tx.clone();
-
-        thread::spawn(move || {
+        move || {
             let monitor = HotplugMonitor::new("hidraw").expect("Cannot monitor hotplug events");
 
             loop {
@@ -228,8 +227,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } {}
                 }
             }
-        });
-    }
+        }
+    });
 
     //
     // At this point we've kicked off the thread to manage input from the
@@ -378,7 +377,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 unreachable!();
                             }
                         } else if State::Silent == next_mute_state {
-                            info!("No mute change event (no streams)");
+                            if let Err(e) = webhook() {
+                                info!("Webhook failed: {e}");
+                            }
                         }
                     }
                 }
@@ -404,6 +405,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .unwrap();
 
     mainloop.run();
+
+    Ok(())
+}
+
+// This is a hack and shouldn't be checked in without being generalized.
+fn webhook() -> Result<(), std::io::Error> {
+    /*
+    let reply = ureq::post("http://aniseed.lan/switch/ac_relay/toggle").call()?;
+
+    info!(
+        "Using webhook to toggle relay: Status {}, {}",
+        reply.status(),
+        reply.status_text()
+    );
+    */
 
     Ok(())
 }
