@@ -1,0 +1,13 @@
+[Unit]
+Description=MuteMagic daemon
+Requires=pipewire.socket
+After=pipewire.socket
+
+[Service]
+Environment="RUST_LOG=info"
+ExecStart=%h/.cargo/bin/mutemagic-rs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
