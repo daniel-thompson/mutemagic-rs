@@ -1,18 +1,15 @@
 [package]
 name = "mutemagic-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
-# TODO: This project used pipeline-rs features that have not yet been
-#       released to crates.io forcing us to take libspa and pipeline
-#       from git instead. Eventually this needs to be corrected!
 [dependencies]
-ctrlc = { version = "3.4.0", features = ["termination"] }
-hidapi = "2.3.3"
-libspa = { git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs" }
-libspa-sys = { git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs" }
-log = "0.4.19"
-nix = "0.26.2"
-pipewire = { git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs" }
+ctrlc = { version = "3.4.4", features = ["termination"] }
+hidapi = "2.6.1"
+libspa = "0.8.0"
+libspa-sys = "0.8.0"
+log = "0.4.21"
+nix = { version = "0.28.0", features = ["poll"] }
+pipewire = "0.8.0"
 pretty_env_logger = "0.5.0"
-udev = "0.7.0"
+udev = "0.8.0"

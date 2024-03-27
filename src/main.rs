@@ -3,15 +3,16 @@
 use hidapi::HidApi;
 use libspa::pod::deserialize::PodDeserializer;
 use libspa::pod::serialize::PodSerializer;
-use libspa::pod::{Object, Property, PropertyFlags, Value};
+use libspa::pod::{Object, Pod, Property, PropertyFlags, Value};
 use libspa_sys::{SPA_PARAM_Props, SPA_PROP_mute, SPA_TYPE_OBJECT_Props};
 use log::*;
-use pipewire::{prelude::*, Context, MainLoop};
+use nix::poll;
+use pipewire::{context::Context, main_loop::MainLoop};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::rc::Rc;
 use std::thread;
 
@@ -91,18 +92,21 @@ impl StreamContext {
         // stream context to ensure it is not dropped.
         let _node_listener = node
             .add_listener_local()
-            .param(move |_s, _pt, _u1, _u2, buf| {
-                let (_, data) = PodDeserializer::deserialize_from::<Value>(&buf).unwrap();
+            .param(move |_s, _pt, _u1, _u2, pod| {
+                if let Some(pod) = pod {
+                    let (_, data) =
+                        PodDeserializer::deserialize_from::<Value>(pod.as_bytes()).unwrap();
 
-                debug!("Evaluating node parameter: {:?}", &data);
+                    debug!("Evaluating node parameter: {:?}", &data);
 
-                if let Value::Object(data) = data {
-                    let i = data
-                        .properties
-                        .binary_search_by(|prop| prop.key.cmp(&SPA_PROP_mute));
-                    if let Ok(i) = i {
-                        if let Value::Bool(mute) = data.properties[i].value {
-                            update_mute(mute);
+                    if let Value::Object(data) = data {
+                        let i = data
+                            .properties
+                            .binary_search_by(|prop| prop.key.cmp(&SPA_PROP_mute));
+                        if let Ok(i) = i {
+                            if let Value::Bool(mute) = data.properties[i].value {
+                                update_mute(mute);
+                            }
                         }
                     }
                 }
@@ -145,12 +149,12 @@ impl HotplugMonitor {
     }
 
     fn wait_for_event(&self) -> io::Result<udev::Event> {
-        let mut fds = [nix::poll::PollFd::new(
-            self.socket.as_raw_fd(),
-            nix::poll::PollFlags::POLLIN,
+        let mut fds = [poll::PollFd::new(
+            self.socket.as_fd(),
+            poll::PollFlags::POLLIN,
         )];
 
-        let result = nix::poll::poll(&mut fds, -1);
+        let result = poll::poll(&mut fds, poll::PollTimeout::NONE);
         if let Err(_errno) = result {
             Err(io::Error::last_os_error())
         } else {
@@ -232,7 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // puck so we can use the main thread to run the pipewire main loop.
     //
 
-    let mainloop = MainLoop::new()?;
+    let mainloop = MainLoop::new(None)?;
     let context = Context::new(&mainloop)?;
     let core = context.connect(None)?;
     let registry = core.get_registry()?;
@@ -319,7 +323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .register();
 
-    let _rx = rx.attach(&mainloop, {
+    let _rx = rx.attach(mainloop.loop_(), {
         let mute_state = Cell::new(State::Silent);
         let button_state = Cell::new(Event::Release);
 
@@ -341,7 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
 
                         if let Some(mute) = next_mute_state.is_muted() {
-                            let pod = Value::Object(Object {
+                            let value = Value::Object(Object {
                                 type_: SPA_TYPE_OBJECT_Props,
                                 id: SPA_PARAM_Props,
                                 properties: vec![Property {
@@ -351,17 +355,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }],
                             });
 
-                            let mut data = std::io::Cursor::new(Vec::<u8>::new());
-                            let res = PodSerializer::serialize(&mut data, &pod);
+                            let mut raw_data = std::io::Cursor::new(Vec::<u8>::new());
+                            let res = PodSerializer::serialize(&mut raw_data, &value);
 
                             if let Ok((data, len)) = res {
                                 let data = data.get_ref();
                                 assert!(data.len() == len as usize);
 
-                                let nodes = nodes.borrow_mut();
-
-                                for (_k, ctx) in nodes.iter() {
-                                    ctx.node.set_param(libspa::param::ParamType::Props, 0, data);
+                                if let Some(pod) = Pod::from_bytes(data) {
+                                    let nodes = nodes.borrow_mut();
+                                    for (_k, ctx) in nodes.iter() {
+                                        ctx.node.set_param(
+                                            libspa::param::ParamType::Props,
+                                            0,
+                                            &pod,
+                                        );
+                                    }
+                                } else {
+                                    unreachable!();
                                 }
                             } else {
                                 unreachable!();
