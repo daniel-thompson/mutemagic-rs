@@ -78,9 +78,13 @@ cargo install --path .
 # If you do not install the appropriate udev rules then you will be
 # forced to run MuteMagic as root...
 sudo cp rules.d/60-mutemagic.rules /etc/udev/rules.d
-sudo udevadm monitor --reload
+sudo udevadm control --reload
 
-mutemagic-rs
+# Now lets get it running automatically whenever we login
+mkdir -p $HOME/.config/systemd/user
+cp mutemagic.service $HOME/.config/systemd/user
+systemctl --user enable --now mutemagic
+systemctl --user status mutemagic
 ~~~
 
 License
