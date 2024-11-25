@@ -1,6 +1,6 @@
 [package]
 name = "mutemagic-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -9,7 +9,7 @@ hidapi = "2.6.1"
 libspa = "0.8.0"
 libspa-sys = "0.8.0"
 log = "0.4.21"
-nix = { version = "0.28.0", features = ["poll"] }
+nix = { version = "0.29.0", features = ["poll"] }
 pipewire = "0.8.0"
 pretty_env_logger = "0.5.0"
 udev = "0.8.0"
